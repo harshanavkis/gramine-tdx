@@ -97,7 +97,25 @@ static int virtio_fs_exec_request(size_t count, struct virtio_fs_desc* descs) {
     assert(count >= 3);
 
     int ret;
+    
+    uint8_t data[] = {1, 2, 3, 4};
+
+    int64_t bytes = virtio_vsock_write(g_fs->vsock_fd, &data, 4);
+
+    uint8_t res[4];
+    bytes = virtio_vsock_read(g_fs->vsock_fd, &res, 4);
+    while (bytes < 0)
+    {
+        bytes = virtio_vsock_read(g_fs->vsock_fd, &res, 4);
+        
+        sched_thread(NULL, NULL);
+    }
+
+    log_error("virtio_vsock_read complete: %x, %x, %x, %x", res[0], res[1], res[2], res[3]);
+
     struct fuse_in_header* hdr_in = descs[0].addr;
+
+    log_error("fuse opcode: %u", hdr_in->opcode);
 
     spinlock_lock(&g_fs_lock);
 
@@ -203,6 +221,18 @@ out:
 
 int virtio_fs_fuse_init(void) {
     int ret;
+
+    int fd = virtio_vsock_socket(AF_VSOCK, VIRTIO_VSOCK_TYPE_STREAM, /*protocol=*/0);
+    if (fd < 0)
+        return fd;
+
+    struct sockaddr_vm addr_vm = { .svm_port = 31337, .svm_cid = g_vsock->host_cid };
+    ret = virtio_vsock_connect(fd, &addr_vm, sizeof(addr_vm),
+                                   VSOCK_CONNECT_TIMEOUT_US);
+    if (ret < 0)
+        return ret;
+    
+    g_fs->vsock_fd = fd;
 
     struct fuse_in_header  hdr_in   = { .opcode = FUSE_INIT };
     struct fuse_init_in    init_in  = { .major = FUSE_KERNEL_VERSION,

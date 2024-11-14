@@ -259,6 +259,8 @@ struct virtio_fs {
     struct virtio_pci_regs* pci_regs;    /* PCI BAR device control regs */
     struct virtio_fs_config* pci_config; /* PCI BAR config space */
     uint32_t* interrupt_status_reg;      /* PCI BAR interrupt: used buffer/conf change */
+
+    int vsock_fd;
 };
 
 int virtio_fs_fuse_init(void);
