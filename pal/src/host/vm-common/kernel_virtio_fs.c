@@ -97,25 +97,8 @@ static int virtio_fs_exec_request(size_t count, struct virtio_fs_desc* descs) {
     assert(count >= 3);
 
     int ret;
-    
-    uint8_t data[] = {1, 2, 3, 4};
-
-    int64_t bytes = virtio_vsock_write(g_fs->vsock_fd, &data, 4);
-
-    uint8_t res[4];
-    bytes = virtio_vsock_read(g_fs->vsock_fd, &res, 4);
-    while (bytes < 0)
-    {
-        bytes = virtio_vsock_read(g_fs->vsock_fd, &res, 4);
-        
-        sched_thread(NULL, NULL);
-    }
-
-    log_error("virtio_vsock_read complete: %x, %x, %x, %x", res[0], res[1], res[2], res[3]);
 
     struct fuse_in_header* hdr_in = descs[0].addr;
-
-    log_error("fuse opcode: %u", hdr_in->opcode);
 
     spinlock_lock(&g_fs_lock);
 
@@ -158,63 +141,25 @@ static int virtio_fs_exec_request(size_t count, struct virtio_fs_desc* descs) {
     for (size_t i = 0; i < count; i++) {
         uint16_t flags = i == count - 1 ? 0 : VIRTQ_DESC_F_NEXT;
         if (descs[i].in) {
-            /* write to untrusted shared memory, safe */
-			vm_shared_memcpy(shared_buf_addr, descs[i].addr, descs[i].size);
-        } else {
-            /* zero out in untrusted shared memory and mark desc as to-be-written by device */
-            vm_shared_memset(shared_buf_addr, 0, descs[i].size);
-            flags |= VIRTQ_DESC_F_WRITE;
+            int64_t bytes = virtio_vsock_write(g_fs->vsock_fd, descs[i].addr, descs[i].size);
         }
-
-        ret = virtq_alloc_desc(g_fs->requests, shared_buf_addr, descs[i].size, flags,
-                               &descs[i].idx);
-        if (ret < 0)
-            goto out;
-
-        descs[i].allocated = true;
-        shared_buf_addr += descs[i].size;
-    }
-
-    for (size_t i = 0; i < count - 1; i++) {
-        vm_shared_writew(&g_fs->requests->desc[descs[i].idx].next, descs[i + 1].idx);
-    }
-    vm_shared_writew(&g_fs->requests->desc[descs[count - 1].idx].next, 0);
-
-    uint16_t avail_idx = g_fs->requests->cached_avail_idx;
-    g_fs->requests->cached_avail_idx++;
-
-    vm_shared_writew(&g_fs->requests->avail->ring[avail_idx % g_fs->requests->queue_size],
-                     descs[0].idx);
-    vm_shared_writew(&g_fs->requests->avail->idx, g_fs->requests->cached_avail_idx);
-
-    uint16_t host_device_used_flags = vm_shared_readw(&g_fs->requests->used->flags);
-    if (!(host_device_used_flags & VIRTQ_USED_F_NO_NOTIFY))
-        vm_mmio_writew(g_fs->requests_notify_addr, /*queue_sel=*/1);
-
-    while (true) {
-        uint16_t host_used_idx = vm_shared_readw(&g_fs->requests->used->idx);
-        if (host_used_idx == g_fs->requests->cached_avail_idx)
-            break;
-
-        /* FIXME: simply spinning until the VMM processes the request; maybe use MWAIT?  */
-        CPU_RELAX();
     }
 
     shared_buf_addr = g_fs->shared_buf;
     for (size_t i = 0; i < count; i++) {
         if (!descs[i].in) {
-            /* copy from untrusted shared memory, these contents should be verified */
-            vm_shared_memcpy(descs[i].addr, shared_buf_addr, descs[i].size);
+            int64_t bytes = virtio_vsock_read(g_fs->vsock_fd, descs[i].addr, descs[i].size);
+            while (bytes < 0)
+            {
+                bytes = virtio_vsock_read(g_fs->vsock_fd, descs[i].addr, descs[i].size);                
+                sched_thread(NULL, NULL);
+            }
         }
         shared_buf_addr += descs[i].size;
     }
 
     ret = 0;
 out:
-    for (size_t i = 0; i < count; i++) {
-        if (descs[i].allocated)
-            virtq_free_desc(g_fs->requests, descs[i].idx);
-    }
     spinlock_unlock(&g_fs_lock);
     return ret;
 }
@@ -331,9 +276,11 @@ int virtio_fs_fuse_readlink(uint64_t nodeid, uint64_t size, char* out_buf, uint6
     };
 
     ret = virtio_fs_exec_request(/*count=*/3, descs);
+    // log_error("virtio_fs_fuse_readlink: error: %d", hdr_out.error);
     if (ret < 0)
         goto out;
     if (hdr_out.error < 0) {
+        // log_error("virtio_fs_fuse_readlink: error: %d", hdr_out.error);
         ret = unix_to_pal_error(hdr_out.error);
         goto out;
     }
